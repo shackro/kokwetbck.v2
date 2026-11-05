@@ -1,0 +1,1 @@
+"""Kokwet FastAPI application package."""
