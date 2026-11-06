@@ -271,6 +271,7 @@ def main() -> None:
         checkout_ids = iter((
             "ws_CO_qa_extension",
             "ws_CO_qa_ticket",
+            "ws_CO_qa_cancelled_ticket",
             "ws_CO_qa_expired_ticket",
             "ws_CO_qa_review_ticket",
         ))
@@ -388,14 +389,29 @@ def main() -> None:
                 response_body = error.read()
                 return error.code, json.loads(response_body) if response_body else {}
 
-        def mpesa_callback(checkout_id: str, amount: int, result_code: int = 0) -> dict[str, object]:
+        def mpesa_callback(
+            checkout_id: str,
+            amount: int,
+            result_code: int = 0,
+            *,
+            receipt_number: str | None = None,
+            phone_number: int | None = None,
+        ) -> dict[str, object]:
+            items = [{"Name": "Amount", "Value": amount}]
+            if receipt_number is not None:
+                items.extend((
+                    {"Name": "MpesaReceiptNumber", "Value": receipt_number},
+                    {"Name": "TransactionDate", "Value": 20261106123045},
+                ))
+            if phone_number is not None:
+                items.append({"Name": "PhoneNumber", "Value": phone_number})
             return {
                 "Body": {
                     "stkCallback": {
                         "CheckoutRequestID": checkout_id,
                         "ResultCode": result_code,
                         "CallbackMetadata": {
-                            "Item": [{"Name": "Amount", "Value": amount}]
+                            "Item": items
                         },
                     }
                 }
@@ -527,7 +543,7 @@ def main() -> None:
                 extension_callback_url,
                 mpesa_callback(extension["checkout_request_id"], 30),
             )
-            assert status == 200 and callback["status"] == "success"
+            assert status == 200 and callback == {"ResultCode": 0, "ResultDesc": "Success"}
             status, feed = call("GET", "/api/v1/culture/feed")
             preserved = next(item for item in feed["posts"] if item["post_id"] == post_id)
             assert preserved["retention_lifespan"] == "7_DAYS"
@@ -551,18 +567,53 @@ def main() -> None:
             assert unpaid_email_status == 409
             first_ticket_checkout_id = stk_requests[-1]["checkout_request_id"]
             assert isinstance(first_ticket_checkout_id, str)
+            invalid_callback_url = "/api/v1/tickets/webhook/mpesa?" + urllib.parse.urlencode(
+                {"token": "invalid-test-token"}
+            )
+            unauthorized_status, _ = call(
+                "POST",
+                invalid_callback_url,
+                mpesa_callback(first_ticket_checkout_id, order["total"]),
+            )
+            assert unauthorized_status == 401
             mismatch_status, mismatch = call(
                 "POST",
                 callback_url,
                 mpesa_callback(first_ticket_checkout_id, order["total"] - 1),
             )
-            assert mismatch_status == 200 and mismatch["status"] == "review"
+            assert mismatch_status == 200 and mismatch == {"ResultCode": 0, "ResultDesc": "Success"}
             paid_status, paid_callback = call(
                 "POST",
                 callback_url,
-                mpesa_callback(first_ticket_checkout_id, order["total"]),
+                mpesa_callback(
+                    first_ticket_checkout_id,
+                    order["total"],
+                    receipt_number="QA123ABC",
+                    phone_number=254712345678,
+                ),
             )
-            assert paid_status == 200 and paid_callback["status"] == "success"
+            assert paid_status == 200 and paid_callback == {"ResultCode": 0, "ResultDesc": "Success"}
+            duplicate_status, duplicate_callback = call(
+                "POST",
+                callback_url,
+                mpesa_callback(
+                    first_ticket_checkout_id,
+                    order["total"],
+                    receipt_number="QA123ABC",
+                    phone_number=254712345678,
+                ),
+            )
+            assert duplicate_status == 200
+            assert duplicate_callback == {"ResultCode": 0, "ResultDesc": "Success"}
+            with sqlite3.connect(database_path) as connection:
+                callback_payment = connection.execute(
+                    """
+                    SELECT mpesa_receipt_number, mpesa_transaction_date, mpesa_phone
+                    FROM festival_orders WHERE order_id = ?
+                    """,
+                    (order["order_id"],),
+                ).fetchone()
+            assert callback_payment == ("QA123ABC", "20261106123045", "254712345678")
             status, paid_order = call("GET", f"/api/v1/tickets/orders/{order['order_id']}")
             assert status == 200 and paid_order["status"] == "Paid"
             assert len(paid_order["tickets"]) == 1
@@ -614,6 +665,26 @@ def main() -> None:
             assert stored_ticket[2] and stored_ticket[2] != ticket_token
             print("PASS confirmed tickets can be privately linked and emailed; unpaid orders cannot request email")
 
+            cancel_status, cancelled_order = call(
+                "POST",
+                "/api/checkout/cart",
+                {"items": [{"pass_id": "regular", "quantity": 1}], "phone": "0712345678"},
+            )
+            assert cancel_status == 200 and cancelled_order["status"] == "Payment pending"
+            cancelled_checkout_id = stk_requests[-1]["checkout_request_id"]
+            cancel_callback_status, cancel_callback = call(
+                "POST",
+                callback_url,
+                mpesa_callback(cancelled_checkout_id, 0, result_code=1032),
+            )
+            assert cancel_callback_status == 200
+            assert cancel_callback == {"ResultCode": 0, "ResultDesc": "Success"}
+            _, cancelled_order_status = call(
+                "GET", f"/api/v1/tickets/orders/{cancelled_order['order_id']}"
+            )
+            assert cancelled_order_status["status"] == "Payment cancelled"
+            print("PASS Daraja cancellation callback acknowledges and releases the ticket reservation")
+
             expiry_status, expiring_order = call(
                 "POST",
                 "/api/checkout/cart",
@@ -636,10 +707,10 @@ def main() -> None:
                 callback_url,
                 mpesa_callback(expired_checkout_id, expiring_order["total"]),
             )
-            assert late_status == 200 and late_callback["status"] == "success", (
-                late_status,
-                late_callback,
-            )
+            assert late_status == 200 and late_callback == {
+                "ResultCode": 0,
+                "ResultDesc": "Success",
+            }, (late_status, late_callback)
             _, late_order = call(
                 "GET", f"/api/v1/tickets/orders/{expiring_order['order_id']}"
             )
@@ -658,7 +729,10 @@ def main() -> None:
                 callback_url,
                 mpesa_callback(review_checkout_id, review_order["total"] - 1),
             )
-            assert review_status == 200 and review_callback["status"] == "review"
+            assert review_status == 200 and review_callback == {
+                "ResultCode": 0,
+                "ResultDesc": "Success",
+            }
             print("PASS 4/6: payment callback issues a ticket; expired reservations release stock once")
 
             admin_status, admin_login = call(

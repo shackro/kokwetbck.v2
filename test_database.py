@@ -194,6 +194,7 @@ class PostgresDialectTests(unittest.TestCase):
             {
                 "DATABASE_URL": "postgresql://private.invalid/kokwet",
                 "KOKWET_REQUIRE_DATABASE_URL": "true",
+                "KOKWET_USE_SQLITE": "false",
                 "KOKWET_DB_SCHEMA": "kokwet_app",
             },
         ), patch.object(

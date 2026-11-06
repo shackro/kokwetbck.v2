@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.database import postgres_mode
 from app.culture import (
+    MpesaRequestError,
     _connect,
     _daraja_access_token,
     _initiate_stk_push,
@@ -40,6 +41,10 @@ TICKET_CALLBACK_PATH = "/api/v1/tickets/webhook/mpesa"
 TICKET_QR_PREFIX = "KWT1."
 TICKET_QR_AAD = b"kokwet-ticket-qr-v1"
 TICKET_STORAGE_AAD = b"kokwet-ticket-storage-v1:"
+
+
+def _ticket_callback_ack() -> dict[str, int | str]:
+    return {"ResultCode": 0, "ResultDesc": "Success"}
 
 
 class EventContent(BaseModel):
@@ -358,7 +363,10 @@ def initialize_catalog_store(*, seed_data: bool = True) -> None:
                 account_reference TEXT,
                 checkout_request_id TEXT UNIQUE,
                 reservation_expires_at TEXT,
-                inventory_released INTEGER NOT NULL DEFAULT 0
+                inventory_released INTEGER NOT NULL DEFAULT 0,
+                mpesa_receipt_number TEXT,
+                mpesa_transaction_date TEXT,
+                mpesa_phone TEXT
             );
             CREATE TABLE IF NOT EXISTS festival_tickets (
                 ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -387,6 +395,9 @@ def initialize_catalog_store(*, seed_data: bool = True) -> None:
             ("inventory_released", "INTEGER NOT NULL DEFAULT 0"),
             ("receipt_email", "TEXT"),
             ("receipt_email_sent_at", "TEXT"),
+            ("mpesa_receipt_number", "TEXT"),
+            ("mpesa_transaction_date", "TEXT"),
+            ("mpesa_phone", "TEXT"),
         ):
             if column not in order_columns:
                 connection.execute(f"ALTER TABLE festival_orders ADD COLUMN {column} {definition}")
@@ -845,20 +856,44 @@ def checkout_cart(payload: CheckoutRequest) -> dict[str, Any]:
             description="Kokwet Festival ticket",
             callback_path=TICKET_CALLBACK_PATH,
         )
-    except HTTPException as error:
+    except MpesaRequestError as error:
         with _connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                UPDATE festival_orders SET status = 'Payment review'
-                WHERE order_id = ? AND status = 'Payment pending'
-                """,
-                (order_id,),
-            )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Payment status could not be confirmed. Do not retry if you received a prompt; contact support with order reference {order_id}.",
-        ) from error
+            if error.payment_may_have_started:
+                connection.execute(
+                    """
+                    UPDATE festival_orders SET status = 'Payment review'
+                    WHERE order_id = ? AND status = 'Payment pending'
+                    """,
+                    (order_id,),
+                )
+                connection.execute(
+                    "UPDATE festival_tickets SET status = 'Payment review' WHERE order_id = ?",
+                    (order_id,),
+                )
+                detail = (
+                    f"{error.detail}. Do not retry until payment status is confirmed; "
+                    f"contact support with order reference {order_id}."
+                )
+            else:
+                _release_reserved_inventory(connection, order_id)
+                connection.execute(
+                    """
+                    UPDATE festival_orders
+                    SET status = 'Payment failed', inventory_released = 1
+                    WHERE order_id = ? AND status = 'Payment pending'
+                    """,
+                    (order_id,),
+                )
+                connection.execute(
+                    "UPDATE festival_tickets SET status = 'Payment failed' WHERE order_id = ?",
+                    (order_id,),
+                )
+                detail = (
+                    f"{error.detail}. No payment prompt was accepted and the "
+                    "reservation has been released."
+                )
+        raise HTTPException(status_code=502, detail=detail) from error
 
     checkout_request_id = response.get("CheckoutRequestID")
     if response.get("ResponseCode") != "0" or not isinstance(checkout_request_id, str):
@@ -1055,7 +1090,7 @@ def email_ticket_order(
 def ticket_payment_webhook(
     payload: dict[str, Any],
     token: Annotated[str | None, Query()] = None,
-) -> dict[str, str]:
+) -> dict[str, int | str]:
     webhook_secret = os.getenv("CULTURE_WEBHOOK_SECRET")
     if not webhook_secret:
         raise HTTPException(status_code=503, detail="M-Pesa callbacks are not configured")
@@ -1083,30 +1118,35 @@ def ticket_payment_webhook(
         if not order:
             raise HTTPException(status_code=404, detail="Ticket payment request not found")
         if order["status"] == "Paid":
-            return {"status": "success", "message": "Ticket payment was already processed"}
-        if order["status"] == "Payment failed":
-            return {"status": "ignored", "message": "Ticket payment was already marked failed"}
+            return _ticket_callback_ack()
+        if order["status"] in {"Payment failed", "Payment cancelled"}:
+            return _ticket_callback_ack()
         if result_code != 0:
+            payment_status = (
+                "Payment cancelled" if result_code == 1032 else "Payment failed"
+            )
             if not order["inventory_released"]:
                 _release_reserved_inventory(connection, order["order_id"])
             connection.execute(
-                "UPDATE festival_orders SET status = 'Payment failed', inventory_released = 1 WHERE order_id = ?",
-                (order["order_id"],),
+                "UPDATE festival_orders SET status = ?, inventory_released = 1 WHERE order_id = ?",
+                (payment_status, order["order_id"]),
             )
             connection.execute(
-                "UPDATE festival_tickets SET status = 'Payment failed' WHERE order_id = ?",
-                (order["order_id"],),
+                "UPDATE festival_tickets SET status = ? WHERE order_id = ?",
+                (payment_status, order["order_id"]),
             )
-            return {"status": "ignored", "message": "Payment failed or was cancelled"}
+            return _ticket_callback_ack()
 
         metadata = callback.get("CallbackMetadata")
         items = metadata.get("Item", []) if isinstance(metadata, dict) else []
         if not isinstance(items, list):
             raise HTTPException(status_code=400, detail="Invalid M-Pesa payment details")
-        amount = next(
-            (item.get("Value") for item in items if isinstance(item, dict) and item.get("Name") == "Amount"),
-            None,
-        )
+        metadata_items = {
+            item.get("Name"): item.get("Value")
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("Name"), str)
+        }
+        amount = metadata_items.get("Amount")
         if type(amount) is not int or amount != order["total"]:
             connection.execute(
                 "UPDATE festival_orders SET status = 'Payment review' WHERE order_id = ?",
@@ -1116,7 +1156,7 @@ def ticket_payment_webhook(
                 "UPDATE festival_tickets SET status = 'Payment review' WHERE order_id = ?",
                 (order["order_id"],),
             )
-            return {"status": "review", "message": "Payment amount needs staff review"}
+            return _ticket_callback_ack()
 
         if order["inventory_released"]:
             reservations = connection.execute(
@@ -1144,7 +1184,7 @@ def ticket_payment_webhook(
                     "UPDATE festival_tickets SET status = 'Payment review' WHERE order_id = ?",
                     (order["order_id"],),
                 )
-                return {"status": "review", "message": "Payment needs staff review because the reservation expired"}
+                return _ticket_callback_ack()
             for reservation in reservations:
                 connection.execute(
                     "UPDATE festival_passes SET stock = stock - ? WHERE pass_id = ?",
@@ -1155,16 +1195,28 @@ def ticket_payment_webhook(
             """
             UPDATE festival_orders
             SET status = 'Paid', simulated = 0, reservation_expires_at = NULL,
-                inventory_released = 0
+                inventory_released = 0, mpesa_receipt_number = ?,
+                mpesa_transaction_date = ?, mpesa_phone = ?
             WHERE order_id = ?
             """,
-            (order["order_id"],),
+            (
+                str(metadata_items["MpesaReceiptNumber"])
+                if metadata_items.get("MpesaReceiptNumber") is not None
+                else None,
+                str(metadata_items["TransactionDate"])
+                if metadata_items.get("TransactionDate") is not None
+                else None,
+                str(metadata_items["PhoneNumber"])
+                if metadata_items.get("PhoneNumber") is not None
+                else None,
+                order["order_id"],
+            ),
         )
         connection.execute(
             "UPDATE festival_tickets SET status = 'Paid', simulated = 0 WHERE order_id = ?",
             (order["order_id"],),
         )
-    return {"status": "success", "message": "Ticket payment confirmed"}
+    return _ticket_callback_ack()
 
 
 @public_router.post("/validate")

@@ -24,6 +24,13 @@ PostgreSQL connections use TLS and the schema configured by
    `render.yaml` before deploying. If existing encrypted ticket data is being
    migrated, its encryption key must remain available during that migration.
 
+Database and key files have been removed from the current repository snapshot,
+but previous Git commits may still contain them. Rotate any credentials that
+were committed or exposed. Before changing `TICKET_ENCRYPTION_KEY`, migrate
+existing encrypted ticket values; changing it without migration can make
+existing ticket QR codes unrecoverable. Rotating the staff activation secret
+invalidates outstanding invitation codes.
+
 The backend stores its relational records and uploaded media in PostgreSQL.
 Schema initialization does not copy data from the old Supabase database or a
 SQLite file. Legacy compatibility endpoints read old tables in the PostgreSQL

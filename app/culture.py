@@ -194,17 +194,17 @@ def _phone_for_daraja(phone: str) -> str:
 
 
 def _mpesa_settings() -> tuple[str, str, str, str, str]:
-    environment = os.getenv("MPESA_ENV", "sandbox")
+    environment = os.getenv("MPESA_ENV", "sandbox").strip().lower()
     if environment not in {"sandbox", "production"}:
         raise HTTPException(status_code=503, detail="MPESA_ENV must be sandbox or production")
 
     required = {
-        "MPESA_CONSUMER_KEY": os.getenv("MPESA_CONSUMER_KEY"),
-        "MPESA_CONSUMER_SECRET": os.getenv("MPESA_CONSUMER_SECRET"),
-        "MPESA_SHORTCODE": os.getenv("MPESA_SHORTCODE"),
-        "MPESA_PASSKEY": os.getenv("MPESA_PASSKEY"),
-        "MPESA_CALLBACK_URL": os.getenv("MPESA_CALLBACK_URL"),
-        "CULTURE_WEBHOOK_SECRET": os.getenv("CULTURE_WEBHOOK_SECRET"),
+        "MPESA_CONSUMER_KEY": (os.getenv("MPESA_CONSUMER_KEY") or "").strip(),
+        "MPESA_CONSUMER_SECRET": (os.getenv("MPESA_CONSUMER_SECRET") or "").strip(),
+        "MPESA_SHORTCODE": (os.getenv("MPESA_SHORTCODE") or "").strip(),
+        "MPESA_PASSKEY": (os.getenv("MPESA_PASSKEY") or "").strip(),
+        "MPESA_CALLBACK_URL": (os.getenv("MPESA_CALLBACK_URL") or "").strip(),
+        "CULTURE_WEBHOOK_SECRET": (os.getenv("CULTURE_WEBHOOK_SECRET") or "").strip(),
     }
     if any(not value for value in required.values()):
         raise HTTPException(status_code=503, detail="M-Pesa payments are not configured")
@@ -249,6 +249,37 @@ def _request_json(
     return decoded
 
 
+class MpesaRequestError(HTTPException):
+    def __init__(self, detail: str, *, payment_may_have_started: bool) -> None:
+        super().__init__(status_code=502, detail=detail)
+        self.payment_may_have_started = payment_may_have_started
+
+
+def _daraja_callback_ack() -> dict[str, int | str]:
+    return {"ResultCode": 0, "ResultDesc": "Success"}
+
+
+def _daraja_http_error_detail(error: urllib.error.HTTPError, operation: str) -> str:
+    try:
+        with error:
+            response_body = json.loads(error.read().decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        response_body = {}
+
+    detail = f"Daraja {operation} failed (HTTP {error.code})"
+    if isinstance(response_body, dict):
+        error_code = response_body.get("errorCode") or response_body.get("error")
+        error_message = response_body.get("errorMessage") or response_body.get("error_description")
+        if isinstance(error_code, (str, int)):
+            normalized_code = str(error_code).strip()
+            if normalized_code:
+                detail += f", code {normalized_code[:80]}"
+        if isinstance(error_message, str) and error_message.strip():
+            safe_message = " ".join(error_message.split())[:200]
+            detail += f": {safe_message}"
+    return detail
+
+
 def _daraja_access_token(environment: str, consumer_key: str, consumer_secret: str) -> str:
     host = (
         "https://sandbox.safaricom.co.ke"
@@ -262,18 +293,27 @@ def _daraja_access_token(environment: str, consumer_key: str, consumer_secret: s
             headers={"Authorization": f"Basic {credentials}"},
         )
     except urllib.error.HTTPError as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Daraja rejected the OAuth request (HTTP {error.code})",
+        raise MpesaRequestError(
+            _daraja_http_error_detail(error, "OAuth"),
+            payment_may_have_started=False,
         ) from error
     except urllib.error.URLError as error:
-        raise HTTPException(status_code=502, detail="Daraja sandbox could not be reached") from error
+        raise MpesaRequestError(
+            "Daraja OAuth endpoint could not be reached",
+            payment_may_have_started=False,
+        ) from error
     except (TimeoutError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=502, detail="Daraja returned an unreadable OAuth response") from error
+        raise MpesaRequestError(
+            "Daraja returned an unreadable OAuth response",
+            payment_may_have_started=False,
+        ) from error
 
     access_token = token_response.get("access_token")
     if not isinstance(access_token, str) or not access_token:
-        raise HTTPException(status_code=502, detail="Daraja did not provide an OAuth access token")
+        raise MpesaRequestError(
+            "Daraja did not provide an OAuth access token",
+            payment_may_have_started=False,
+        )
     return access_token
 
 
@@ -313,11 +353,20 @@ def _initiate_stk_push(
             },
         )
     except urllib.error.HTTPError as error:
-        raise HTTPException(status_code=502, detail="M-Pesa rejected the checkout request") from error
+        raise MpesaRequestError(
+            _daraja_http_error_detail(error, "STK Push"),
+            payment_may_have_started=error.code >= 500,
+        ) from error
     except urllib.error.URLError as error:
-        raise HTTPException(status_code=502, detail="M-Pesa could not be reached") from error
+        raise MpesaRequestError(
+            "Daraja STK Push endpoint could not be reached; payment status is unknown",
+            payment_may_have_started=True,
+        ) from error
     except (TimeoutError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=502, detail="M-Pesa returned an unreadable response") from error
+        raise MpesaRequestError(
+            "Daraja returned an unreadable STK Push response; payment status is unknown",
+            payment_may_have_started=True,
+        ) from error
 
 
 @router.post("/culture/post", status_code=201)
@@ -630,7 +679,7 @@ async def extend_culture_post(payload: CultureExtensionRequest) -> dict[str, str
 def culture_lifespan_webhook(
     payload: dict[str, Any],
     token: Annotated[str | None, Query()] = None,
-) -> dict[str, str]:
+) -> dict[str, int | str]:
     webhook_secret = os.getenv("CULTURE_WEBHOOK_SECRET")
     if not webhook_secret:
         raise HTTPException(status_code=503, detail="M-Pesa callbacks are not configured")
@@ -643,7 +692,7 @@ def culture_lifespan_webhook(
         raise HTTPException(status_code=400, detail="Invalid M-Pesa callback")
     checkout_request_id = callback.get("CheckoutRequestID")
     result_code = callback.get("ResultCode")
-    if not isinstance(checkout_request_id, str) or not isinstance(result_code, int):
+    if not isinstance(checkout_request_id, str) or type(result_code) is not int:
         raise HTTPException(status_code=400, detail="Invalid M-Pesa callback")
     initialize_culture_store()
     with _connect() as connection:
@@ -658,24 +707,32 @@ def culture_lifespan_webhook(
         if not payment:
             raise HTTPException(status_code=404, detail="Payment request not found")
         if payment["status"] == "completed":
-            return {"status": "success", "message": "Payment was already processed"}
+            return _daraja_callback_ack()
         if result_code != 0:
             connection.execute(
                 "UPDATE culture_pending_payments SET status = 'failed' WHERE checkout_request_id = ?",
                 (checkout_request_id,),
             )
-            return {"status": "ignored", "message": "Payment failed or was cancelled"}
+            return _daraja_callback_ack()
 
         callback_metadata = callback.get("CallbackMetadata")
         metadata_items = callback_metadata.get("Item", []) if isinstance(callback_metadata, dict) else []
         if not isinstance(metadata_items, list):
             raise HTTPException(status_code=400, detail="Invalid M-Pesa payment details")
         amount = next(
-            (item.get("Value") for item in metadata_items if item.get("Name") == "Amount"),
+            (
+                item.get("Value")
+                for item in metadata_items
+                if isinstance(item, dict) and item.get("Name") == "Amount"
+            ),
             None,
         )
-        if amount != payment["amount"]:
-            raise HTTPException(status_code=400, detail="Payment amount does not match the preservation fee")
+        if type(amount) is not int or amount != payment["amount"]:
+            connection.execute(
+                "UPDATE culture_pending_payments SET status = 'failed' WHERE checkout_request_id = ?",
+                (checkout_request_id,),
+            )
+            return _daraja_callback_ack()
         connection.execute(
             """
             UPDATE culture_posts
@@ -688,4 +745,4 @@ def culture_lifespan_webhook(
             "UPDATE culture_pending_payments SET status = 'completed' WHERE checkout_request_id = ?",
             (checkout_request_id,),
         )
-    return {"status": "success", "message": "Post preservation confirmed"}
+    return _daraja_callback_ack()

@@ -308,7 +308,7 @@ class ServicesPageContent(BaseModel):
     focus_label: str = Field(min_length=2, max_length=120)
     submit_label: str = Field(min_length=2, max_length=80)
     success_message: str = Field(min_length=10, max_length=240)
-    name_inspiration_eyebrow: str = Field(default="Interactive cultural sandbox", min_length=2, max_length=80)
+    name_inspiration_eyebrow: str = Field(default="Cultural name inspiration", min_length=2, max_length=80)
     name_inspiration_title: str = Field(default="Explore a name inspired by the moment.", min_length=5, max_length=160)
     name_inspiration_description: str = Field(default="Choose a naming pattern and a circumstance to see an example name and its associated meaning.", min_length=10, max_length=300)
     name_inspiration_note: str = Field(default="Name traditions and meanings vary across families and communities. These are illustrative examples, not an authoritative naming record; please check spellings and interpretations with fluent speakers and cultural elders.", min_length=20, max_length=500)
@@ -363,7 +363,7 @@ class HomeContent(BaseModel):
     pass_section: SectionCopy = Field(default_factory=lambda: SectionCopy(
         eyebrow="Secure in-house ticketing",
         title="Choose your festival pass",
-        description="Reserved inventory, a clear secure checkout and a digital token for every confirmed demo pass.",
+        description="Every confirmed pass includes reserved inventory, secure checkout and a unique digital entry token.",
     ))
     enterprises: list[EnterpriseProfile] = Field(default_factory=lambda: [
         EnterpriseProfile(id="fashion-design", title="Fashion & design", description="Community-run textiles and contemporary cultural garments.", image="https://images.unsplash.com/photo-1606760227091-3dd870d97f1d?auto=format&fit=crop&w=900&q=78"),
@@ -617,6 +617,11 @@ DEFAULT_SITE_CONTENT = SiteContent(
     ],
 )
 
+LEGACY_DEMO_PASS_DESCRIPTION = (
+    "Reserved inventory, a clear secure checkout and a digital token for every confirmed demo pass."
+)
+LEGACY_NAME_INSPIRATION_EYEBROW = "Interactive cultural sandbox"
+
 
 def initialize_site_content_store(*, seed_data: bool = True) -> None:
     with _connect() as connection:
@@ -652,7 +657,15 @@ def _read_site_content(connection: sqlite3.Connection) -> dict[str, Any]:
         DEFAULT_SITE_CONTENT.model_dump(mode="json"),
         stored,
     )
-    return SiteContent.model_validate(merged).model_dump(mode="json")
+    content = SiteContent.model_validate(merged).model_dump(mode="json")
+    if content["home"]["pass_section"]["description"] == LEGACY_DEMO_PASS_DESCRIPTION:
+        content["home"]["pass_section"]["description"] = (
+            "Every confirmed pass includes reserved inventory, secure checkout "
+            "and a unique digital entry token."
+        )
+    if content["services"]["name_inspiration_eyebrow"] == LEGACY_NAME_INSPIRATION_EYEBROW:
+        content["services"]["name_inspiration_eyebrow"] = "Cultural name inspiration"
+    return content
 
 
 def _merge_missing_content(default: Any, stored: Any) -> Any:

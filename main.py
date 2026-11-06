@@ -129,30 +129,45 @@ async def audit_super_admin_mutations(request: Request, call_next):
 
 
 configured_origins = os.getenv("KOKWET_CORS_ORIGINS")
-production_origins = ["https://kokwet-lyart.vercel.app"]
+production_origins = [
+    "https://kokwet-lyart.vercel.app",
+    "https://kokwet-n1dp1914w-shackros-projects.vercel.app",
+]
 local_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://staff.localhost:5173",
 ]
-configured_allowed_origins = (
-    [origin.strip().rstrip("/") for origin in configured_origins.split(",") if origin.strip()]
-    if configured_origins
-    else local_origins
-)
-allowed_origins = (
-    list(dict.fromkeys([*production_origins, *configured_allowed_origins]))
-)
-local_development_origin_regex = (
-    None
-    if configured_origins
-    else r"^https?://(?:(?:localhost|staff\.localhost|127\.0\.0\.1)|(?:10(?:\.\d{1,3}){3})|(?:192\.168(?:\.\d{1,3}){2})|(?:172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})):5173$"
-)
 preview_origin_regex = r"^https://kokwet-[a-z0-9-]+-shackros-projects\.vercel\.app$"
-allowed_origin_regex = (
-    f"(?:{preview_origin_regex})|(?:{local_development_origin_regex})"
-    if local_development_origin_regex
-    else preview_origin_regex
+local_development_origin_regex = (
+    r"^https?://(?:(?:localhost|staff\.localhost|127\.0\.0\.1)|(?:10(?:\.\d{1,3}){3})|(?:192\.168(?:\.\d{1,3}){2})|(?:172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})):5173$"
+)
+
+
+def _cors_settings(
+    configured_origins: str | None, app_environment: str
+) -> tuple[list[str], str]:
+    is_production = app_environment.strip().lower() == "production"
+    extra_origins = (
+        [
+            origin.strip().rstrip("/")
+            for origin in configured_origins.split(",")
+            if origin.strip()
+        ]
+        if configured_origins
+        else []
+    )
+    origins = [*production_origins, *extra_origins]
+    patterns = [preview_origin_regex]
+    if not is_production:
+        origins.extend(local_origins)
+        patterns.append(local_development_origin_regex)
+    regex = "|".join(f"(?:{pattern})" for pattern in patterns)
+    return list(dict.fromkeys(origins)), regex
+
+
+allowed_origins, allowed_origin_regex = _cors_settings(
+    configured_origins, os.getenv("APP_ENV", "")
 )
 fastapi_app.include_router(culture_router)
 fastapi_app.include_router(publishing_router)
