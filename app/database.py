@@ -224,10 +224,17 @@ def _split_sql_script(script: str) -> list[str]:
 
 def database_url() -> str | None:
     value = os.getenv("DATABASE_URL", "").strip()
+    use_sqlite = os.getenv("KOKWET_USE_SQLITE", "").strip().lower() == "true"
     requires_database_url = (
         os.getenv("KOKWET_REQUIRE_DATABASE_URL", "").strip().lower() == "true"
         or os.getenv("APP_ENV", "").strip().lower() == "production"
     )
+    if use_sqlite:
+        if requires_database_url:
+            raise RuntimeError(
+                "KOKWET_USE_SQLITE cannot be enabled when PostgreSQL is required"
+            )
+        return None
     if not value and requires_database_url:
         raise RuntimeError("DATABASE_URL is required for this deployment")
     return value or None

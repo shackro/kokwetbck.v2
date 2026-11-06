@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.database import postgres_mode
 from app.culture import (
     _connect,
     _daraja_access_token,
@@ -315,6 +316,8 @@ DEFAULT_PASSES = [
 
 def initialize_catalog_store(*, seed_data: bool = True) -> None:
     with _connect() as connection:
+        if postgres_mode():
+            connection.execute("BEGIN IMMEDIATE")
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS festival_events (
@@ -485,7 +488,6 @@ def _pass_payload(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def get_events(*, include_inactive: bool = False) -> list[dict[str, Any]]:
-    initialize_catalog_store()
     where = "" if include_inactive else "WHERE is_active = 1"
     with _connect() as connection:
         rows = connection.execute(
@@ -517,7 +519,6 @@ def _release_reserved_inventory(connection: sqlite3.Connection, order_id: str) -
 
 
 def expire_pending_ticket_orders() -> None:
-    initialize_catalog_store()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -546,7 +547,6 @@ def expire_pending_ticket_orders() -> None:
 
 def get_passes(*, include_inactive: bool = False) -> list[dict[str, Any]]:
     expire_pending_ticket_orders()
-    initialize_catalog_store()
     where = "" if include_inactive else "WHERE is_active = 1"
     with _connect() as connection:
         rows = connection.execute(

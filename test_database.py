@@ -287,6 +287,32 @@ class PostgresDialectTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "DATABASE_URL is required"):
                 database_url()
 
+    def test_explicit_local_sqlite_overrides_configured_postgres_url(self):
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "development",
+                "DATABASE_URL": "postgresql://render.invalid/kokwet",
+                "KOKWET_REQUIRE_DATABASE_URL": "false",
+                "KOKWET_USE_SQLITE": "true",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(database_url())
+
+    def test_local_sqlite_override_is_rejected_when_postgres_is_required(self):
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "production",
+                "DATABASE_URL": "postgresql://render.invalid/kokwet",
+                "KOKWET_USE_SQLITE": "true",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cannot be enabled"):
+                database_url()
+
     def test_production_requires_postgres_even_without_blueprint_guard(self):
         with patch.dict(
             os.environ,
