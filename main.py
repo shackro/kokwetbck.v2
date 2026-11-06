@@ -129,14 +129,19 @@ async def audit_super_admin_mutations(request: Request, call_next):
 
 
 configured_origins = os.getenv("KOKWET_CORS_ORIGINS")
-allowed_origins = (
+production_origins = ["https://kokwet-lyart.vercel.app"]
+local_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://staff.localhost:5173",
+]
+configured_allowed_origins = (
     [origin.strip().rstrip("/") for origin in configured_origins.split(",") if origin.strip()]
     if configured_origins
-    else [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://staff.localhost:5173",
-    ]
+    else local_origins
+)
+allowed_origins = (
+    list(dict.fromkeys([*production_origins, *configured_allowed_origins]))
 )
 development_origin_regex = (
     None
