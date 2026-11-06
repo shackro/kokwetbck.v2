@@ -109,10 +109,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await ticket_expiry_task
 
 
-app = FastAPI(title="Kokwet Festival API", version="1.0.0", lifespan=lifespan)
+fastapi_app = FastAPI(title="Kokwet Festival API", version="1.0.0", lifespan=lifespan)
 
 
-@app.middleware("http")
+@fastapi_app.middleware("http")
 async def audit_super_admin_mutations(request: Request, call_next):
     actor = None
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
@@ -148,29 +148,21 @@ development_origin_regex = (
     if configured_origins
     else r"^https?://(?:(?:localhost|staff\.localhost|127\.0\.0\.1)|(?:10(?:\.\d{1,3}){3})|(?:192\.168(?:\.\d{1,3}){2})|(?:172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})):5173$"
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=development_origin_regex,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.include_router(culture_router)
-app.include_router(publishing_router)
-app.include_router(impact_router)
-app.include_router(staff_impact_router)
-app.include_router(roadmap_router)
-app.include_router(staff_roadmap_router)
-app.include_router(site_content_router)
-app.include_router(staff_site_content_router)
-app.include_router(live_router)
-app.include_router(staff_live_router)
-app.include_router(legacy_compat_router)
-app.include_router(catalog_staff_router)
-app.include_router(ticket_router)
-app.include_router(members_router)
-app.include_router(media_router)
+fastapi_app.include_router(culture_router)
+fastapi_app.include_router(publishing_router)
+fastapi_app.include_router(impact_router)
+fastapi_app.include_router(staff_impact_router)
+fastapi_app.include_router(roadmap_router)
+fastapi_app.include_router(staff_roadmap_router)
+fastapi_app.include_router(site_content_router)
+fastapi_app.include_router(staff_site_content_router)
+fastapi_app.include_router(live_router)
+fastapi_app.include_router(staff_live_router)
+fastapi_app.include_router(legacy_compat_router)
+fastapi_app.include_router(catalog_staff_router)
+fastapi_app.include_router(ticket_router)
+fastapi_app.include_router(members_router)
+fastapi_app.include_router(media_router)
 
 class CheckoutCreate(BaseModel):
     pass_id: str
@@ -183,7 +175,7 @@ class MentorshipCreate(BaseModel):
 class FeedbackCreate(BaseModel):
     message: str = Field(min_length=8, max_length=500)
 
-@app.get("/api/health")
+@fastapi_app.get("/api/health")
 def health():
     try:
         check_database_connection()
@@ -191,22 +183,22 @@ def health():
         raise HTTPException(status_code=503, detail="Database unavailable") from None
     return {"status": "online", "service": "kokwet-api", "time": datetime.now().isoformat()}
 
-@app.get("/api/activities")
+@fastapi_app.get("/api/activities")
 def get_activities():
     return get_events()
 
-@app.get("/api/houses")
+@fastapi_app.get("/api/houses")
 def get_houses(tribe: str | None = None):
     profiles = get_house_profiles()
     if tribe:
         return [house for house in profiles if house["name"].lower() == tribe.lower()]
     return profiles
 
-@app.get("/api/passes")
+@fastapi_app.get("/api/passes")
 def get_passes():
     return get_catalog_passes()
 
-@app.post("/api/checkout")
+@fastapi_app.post("/api/checkout")
 def checkout(payload: CheckoutCreate):
     return create_ticket_order(
         CheckoutRequest(
@@ -215,15 +207,25 @@ def checkout(payload: CheckoutCreate):
         )
     )
 
-@app.post("/api/checkout/cart")
+@fastapi_app.post("/api/checkout/cart")
 def checkout_cart(payload: CheckoutRequest):
     return create_ticket_order(payload)
 
-@app.post("/api/mentorship", status_code=201)
+@fastapi_app.post("/api/mentorship", status_code=201)
 def request_mentorship(payload: MentorshipCreate):
     return create_mentorship_request(payload.phone, payload.focus)
 
-@app.post("/api/feedback", status_code=201)
+@fastapi_app.post("/api/feedback", status_code=201)
 def submit_feedback(payload: FeedbackCreate):
     item = create_feedback_submission(payload.message)
     return {"status": "received", "id": item["id"]}
+
+
+app = CORSMiddleware(
+    app=fastapi_app,
+    allow_origins=allowed_origins,
+    allow_origin_regex=development_origin_regex,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
