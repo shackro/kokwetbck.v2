@@ -143,10 +143,16 @@ configured_allowed_origins = (
 allowed_origins = (
     list(dict.fromkeys([*production_origins, *configured_allowed_origins]))
 )
-development_origin_regex = (
+local_development_origin_regex = (
     None
     if configured_origins
     else r"^https?://(?:(?:localhost|staff\.localhost|127\.0\.0\.1)|(?:10(?:\.\d{1,3}){3})|(?:192\.168(?:\.\d{1,3}){2})|(?:172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})):5173$"
+)
+preview_origin_regex = r"^https://kokwet-[a-z0-9-]+-shackros-projects\.vercel\.app$"
+allowed_origin_regex = (
+    f"(?:{preview_origin_regex})|(?:{local_development_origin_regex})"
+    if local_development_origin_regex
+    else preview_origin_regex
 )
 fastapi_app.include_router(culture_router)
 fastapi_app.include_router(publishing_router)
@@ -224,7 +230,7 @@ def submit_feedback(payload: FeedbackCreate):
 app = CORSMiddleware(
     app=fastapi_app,
     allow_origins=allowed_origins,
-    allow_origin_regex=development_origin_regex,
+    allow_origin_regex=allowed_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
