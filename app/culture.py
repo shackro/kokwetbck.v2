@@ -249,15 +249,7 @@ def _request_json(
     return decoded
 
 
-def _initiate_stk_push(
-    phone: str,
-    account_reference: str,
-    *,
-    amount: int = 30,
-    description: str = "Kokwet 7-day post preservation",
-    callback_path: str | None = None,
-) -> dict[str, Any]:
-    environment, consumer_key, consumer_secret, shortcode, passkey = _mpesa_settings()
+def _daraja_access_token(environment: str, consumer_key: str, consumer_secret: str) -> str:
     host = (
         "https://sandbox.safaricom.co.ke"
         if environment == "sandbox"
@@ -269,9 +261,34 @@ def _initiate_stk_push(
             f"{host}/oauth/v1/generate?grant_type=client_credentials",
             headers={"Authorization": f"Basic {credentials}"},
         )
-        access_token = token_response.get("access_token")
-        if not isinstance(access_token, str) or not access_token:
-            raise HTTPException(status_code=502, detail="M-Pesa did not provide an access token")
+    except urllib.error.HTTPError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Daraja rejected the OAuth request (HTTP {error.code})",
+        ) from error
+    except urllib.error.URLError as error:
+        raise HTTPException(status_code=502, detail="Daraja sandbox could not be reached") from error
+    except (TimeoutError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=502, detail="Daraja returned an unreadable OAuth response") from error
+
+    access_token = token_response.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        raise HTTPException(status_code=502, detail="Daraja did not provide an OAuth access token")
+    return access_token
+
+
+def _initiate_stk_push(
+    phone: str,
+    account_reference: str,
+    *,
+    amount: int = 30,
+    description: str = "Kokwet 7-day post preservation",
+    callback_path: str | None = None,
+) -> dict[str, Any]:
+    environment, consumer_key, consumer_secret, shortcode, passkey = _mpesa_settings()
+    host = "https://sandbox.safaricom.co.ke" if environment == "sandbox" else "https://api.safaricom.co.ke"
+    try:
+        access_token = _daraja_access_token(environment, consumer_key, consumer_secret)
 
         timestamp = datetime.now(ZoneInfo("Africa/Nairobi")).strftime("%Y%m%d%H%M%S")
         password = base64.b64encode(f"{shortcode}{passkey}{timestamp}".encode()).decode()

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.culture import (
     _connect,
+    _daraja_access_token,
     _initiate_stk_push,
     _mpesa_settings,
     _phone_for_daraja,
@@ -567,6 +568,25 @@ def get_staff_catalog(
 ) -> dict[str, list[dict[str, Any]]]:
     _require_admin(authorization)
     return {"events": get_events(include_inactive=True), "passes": get_passes(include_inactive=True)}
+
+
+@router.post("/daraja/sandbox-check")
+def check_daraja_sandbox(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, str]:
+    _require_admin(authorization)
+    environment, consumer_key, consumer_secret, _, _ = _mpesa_settings()
+    if environment != "sandbox":
+        raise HTTPException(
+            status_code=409,
+            detail="Set MPESA_ENV=sandbox in Render before testing the Daraja sandbox.",
+        )
+    _daraja_access_token(environment, consumer_key, consumer_secret)
+    return {
+        "environment": "sandbox",
+        "status": "connected",
+        "message": "Daraja sandbox OAuth succeeded. No payment request was sent.",
+    }
 
 
 @router.post("/events", status_code=201)

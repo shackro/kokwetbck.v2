@@ -1,10 +1,11 @@
 import json
 import sqlite3
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Header
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.culture import _connect
 from app.publishing import _staff_from_authorization
@@ -15,6 +16,18 @@ staff_router = APIRouter(prefix="/api/v1/staff", tags=["Roadmap management"])
 RoadmapStatus = Literal["planned", "in_progress", "completed"]
 
 
+def _validate_media_url(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+    if normalized.startswith("/") and not normalized.startswith("//") and ".." not in normalized:
+        return normalized
+    parsed = urlparse(normalized)
+    if parsed.scheme == "https" and parsed.netloc:
+        return normalized
+    raise ValueError("Media URLs must be HTTPS or a safe same-site path")
+
+
 class RoadmapPhase(BaseModel):
     id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9-]+$")
     title: str = Field(min_length=3, max_length=120)
@@ -22,6 +35,12 @@ class RoadmapPhase(BaseModel):
     description: str = Field(min_length=20, max_length=600)
     status: RoadmapStatus = "planned"
     milestones: list[str] = Field(min_length=1, max_length=8)
+    image_url: str = Field(default="", max_length=1000)
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, value: str) -> str:
+        return _validate_media_url(value)
 
     @model_validator(mode="after")
     def validate_milestones(self):
@@ -35,11 +54,33 @@ class RoadmapContent(BaseModel):
     title: str = Field(min_length=3, max_length=120)
     highlight: str = Field(min_length=2, max_length=100)
     introduction: str = Field(min_length=20, max_length=800)
+    hero_image_url: str = Field(default="", max_length=1000)
+    hero_cta_label: str = Field(default="Explore the journey", min_length=2, max_length=80)
     status_note: str = Field(min_length=10, max_length=300)
+    journey_eyebrow: str = Field(default="A shared direction", min_length=2, max_length=80)
+    journey_title_first: str = Field(default="One step,", min_length=2, max_length=80)
+    journey_title_highlight: str = Field(default="together.", min_length=2, max_length=80)
     phases: list[RoadmapPhase] = Field(min_length=1, max_length=8)
+    feedback_eyebrow: str = Field(default="Your voice matters", min_length=2, max_length=80)
     feedback_title: str = Field(min_length=3, max_length=100)
     feedback_description: str = Field(min_length=10, max_length=300)
     feedback_prompt: str = Field(min_length=5, max_length=150)
+    feedback_success_message: str = Field(
+        default="Thank you. Your voice was recorded.",
+        min_length=5,
+        max_length=160,
+    )
+    feedback_button_label: str = Field(default="Send feedback", min_length=2, max_length=80)
+    feedback_placeholder: str = Field(
+        default="Share an idea or priority…",
+        min_length=2,
+        max_length=120,
+    )
+
+    @field_validator("hero_image_url")
+    @classmethod
+    def validate_hero_image_url(cls, value: str) -> str:
+        return _validate_media_url(value)
 
     @model_validator(mode="after")
     def validate_phase_ids(self):

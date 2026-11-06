@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Header
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.culture import _connect
 from app.publishing import _staff_from_authorization
@@ -28,6 +28,12 @@ class ImpactHero(BaseModel):
     title: str = Field(min_length=3, max_length=120)
     highlight: str = Field(min_length=2, max_length=100)
     body: str = Field(min_length=20, max_length=800)
+    image_url: str = Field(default="", max_length=1000)
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, value: str) -> str:
+        return _validate_media_url(value)
 
 
 class ImpactPathway(BaseModel):
@@ -37,6 +43,12 @@ class ImpactPathway(BaseModel):
     actions: list[str] = Field(min_length=1, max_length=5)
     cta_label: str = Field(min_length=2, max_length=60)
     destination: ImpactDestination
+    image_url: str = Field(default="", max_length=1000)
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, value: str) -> str:
+        return _validate_media_url(value)
 
     @model_validator(mode="after")
     def validate_actions(self):
@@ -86,8 +98,37 @@ class ImpactGoal(BaseModel):
 class ImpactContent(BaseModel):
     hero: ImpactHero
     pathways: list[ImpactPathway] = Field(min_length=1, max_length=8)
+    pathways_eyebrow: str = Field(default="A shared effort", min_length=2, max_length=80)
+    pathways_title_first: str = Field(default="Plug into the", min_length=2, max_length=100)
+    pathways_title_highlight: str = Field(default="ecosystem", min_length=2, max_length=100)
+    pathways_copy: str = Field(
+        default="Choose a practical way to contribute. These are invitations to take part—not claims about results already achieved.",
+        min_length=10,
+        max_length=500,
+    )
     transparency: ImpactTransparency
+    accountability_label: str = Field(default="Accountability", min_length=2, max_length=80)
+    unpublished_report_title: str = Field(default="No verified figures published", min_length=3, max_length=120)
+    unpublished_report_body: str = Field(
+        default="We will show a breakdown here when a dated report and its source are ready.",
+        min_length=10,
+        max_length=300,
+    )
+    report_link_label: str = Field(default="Open supporting report", min_length=2, max_length=100)
+    resource_reporting_label: str = Field(default="Resource reporting", min_length=2, max_length=100)
+    resource_empty_title: str = Field(default="Trust is built with evidence.", min_length=3, max_length=120)
+    resource_empty_body: str = Field(
+        default="There are no allocation percentages to display until a proposal or sourced report is published.",
+        min_length=10,
+        max_length=300,
+    )
     goals_heading: str = Field(min_length=3, max_length=120)
+    goals_eyebrow: str = Field(default="Looking ahead", min_length=2, max_length=80)
+    goals_body: str = Field(
+        default="These priorities are updated by the Kokwet team. A status describes the plan, not a measured outcome.",
+        min_length=10,
+        max_length=300,
+    )
     goals: list[ImpactGoal] = Field(min_length=1, max_length=12)
 
     @model_validator(mode="after")
@@ -188,6 +229,18 @@ DEFAULT_IMPACT = ImpactContent(
         ),
     ],
 )
+
+
+def _validate_media_url(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+    if normalized.startswith("/") and not normalized.startswith("//") and ".." not in normalized:
+        return normalized
+    parsed = urlparse(normalized)
+    if parsed.scheme == "https" and parsed.netloc:
+        return normalized
+    raise ValueError("Media URLs must be HTTPS or a safe same-site path")
 
 
 def initialize_impact_store(*, seed_data: bool = True) -> None:
