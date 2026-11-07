@@ -5,6 +5,8 @@ import hmac
 import json
 import os
 import sqlite3
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +25,9 @@ from app.database import connect as _database_connect
 router = APIRouter(prefix="/api/v1", tags=["Culture"])
 
 MAX_AUDIO_BYTES = 2 * 1024 * 1024
+_DARAJA_TOKEN_REFRESH_BUFFER_SECONDS = 60
+_daraja_token_cache: dict[str, tuple[str, float]] = {}
+_daraja_token_cache_lock = threading.Lock()
 MAX_TEXT_LENGTH = 1000
 MAX_POSTS_PER_DAY = 3
 AUDIO_TYPES = {
@@ -286,6 +291,31 @@ def _daraja_access_token(environment: str, consumer_key: str, consumer_secret: s
         if environment == "sandbox"
         else "https://api.safaricom.co.ke"
     )
+    cache_key = hashlib.sha256(
+        f"{environment}\0{consumer_key}\0{consumer_secret}".encode("utf-8")
+    ).hexdigest()
+    with _daraja_token_cache_lock:
+        cached_token = _daraja_token_cache.get(cache_key)
+        now = time.monotonic()
+        if cached_token and cached_token[1] > now:
+            return cached_token[0]
+
+        access_token, expires_in = _fetch_daraja_access_token(
+            host, consumer_key, consumer_secret
+        )
+        if expires_in > _DARAJA_TOKEN_REFRESH_BUFFER_SECONDS:
+            _daraja_token_cache[cache_key] = (
+                access_token,
+                time.monotonic() + expires_in - _DARAJA_TOKEN_REFRESH_BUFFER_SECONDS,
+            )
+        return access_token
+
+
+def _fetch_daraja_access_token(
+    host: str,
+    consumer_key: str,
+    consumer_secret: str,
+) -> tuple[str, int]:
     credentials = base64.b64encode(f"{consumer_key}:{consumer_secret}".encode()).decode()
     try:
         token_response = _request_json(
@@ -314,7 +344,11 @@ def _daraja_access_token(environment: str, consumer_key: str, consumer_secret: s
             "Daraja did not provide an OAuth access token",
             payment_may_have_started=False,
         )
-    return access_token
+    try:
+        expires_in = int(token_response.get("expires_in", 0))
+    except (TypeError, ValueError):
+        expires_in = 0
+    return access_token, expires_in
 
 
 def _initiate_stk_push(

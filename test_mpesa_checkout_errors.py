@@ -11,11 +11,19 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.catalog import CheckoutLine, CheckoutRequest, checkout_cart, initialize_catalog_store
-from app.culture import MpesaRequestError, _daraja_access_token, _initiate_stk_push
+from app.culture import (
+    MpesaRequestError,
+    _daraja_access_token,
+    _daraja_token_cache,
+    _daraja_token_cache_lock,
+    _initiate_stk_push,
+)
 
 
 class MpesaCheckoutErrorTests(unittest.TestCase):
     def setUp(self):
+        with _daraja_token_cache_lock:
+            _daraja_token_cache.clear()
         self.temp_dir = tempfile.TemporaryDirectory(prefix="kokwet-mpesa-test-")
         self.database_path = Path(self.temp_dir.name) / "checkout.sqlite3"
         self.environment = patch.dict(
@@ -142,6 +150,50 @@ class MpesaCheckoutErrorTests(unittest.TestCase):
         self.assertIn("Invalid client credentials", raised.exception.detail)
         self.assertNotIn("key-not-logged", raised.exception.detail)
         self.assertNotIn("secret-not-logged", raised.exception.detail)
+
+    def test_oauth_access_token_is_reused_until_refresh_buffer(self):
+        with (
+            patch(
+                "app.culture.time.monotonic",
+                side_effect=[100, 100, 159, 160, 160],
+            ),
+            patch(
+                "app.culture._request_json",
+                side_effect=[
+                    {"access_token": "first-token", "expires_in": "120"},
+                    {"access_token": "second-token", "expires_in": "120"},
+                ],
+            ) as request_json,
+        ):
+            first = _daraja_access_token("sandbox", "key", "secret")
+            reused = _daraja_access_token("sandbox", "key", "secret")
+            refreshed = _daraja_access_token("sandbox", "key", "secret")
+
+        self.assertEqual((first, reused, refreshed), (
+            "first-token",
+            "first-token",
+            "second-token",
+        ))
+        self.assertEqual(request_json.call_count, 2)
+
+    def test_oauth_token_cache_is_isolated_by_environment_and_credentials(self):
+        with patch(
+            "app.culture._request_json",
+            side_effect=[
+                {"access_token": "sandbox-token", "expires_in": "3599"},
+                {"access_token": "production-token", "expires_in": "3599"},
+                {"access_token": "other-app-token", "expires_in": "3599"},
+            ],
+        ) as request_json:
+            sandbox = _daraja_access_token("sandbox", "key", "secret")
+            production = _daraja_access_token("production", "key", "secret")
+            other_app = _daraja_access_token("sandbox", "other-key", "other-secret")
+
+        self.assertEqual(
+            (sandbox, production, other_app),
+            ("sandbox-token", "production-token", "other-app-token"),
+        )
+        self.assertEqual(request_json.call_count, 3)
 
     def test_stk_server_error_is_marked_ambiguous(self):
         error = urllib.error.HTTPError(

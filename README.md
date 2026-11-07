@@ -55,6 +55,8 @@ cannot resolve it. Check the sanitized backend error for Daraja's `error` /
 `errorCode` and `error_description` / `errorMessage`, then verify the app
 credentials and environment. Do not copy credentials from examples, print them,
 or put them in shell commands or browser code.
+Daraja access tokens are cached in process memory until 60 seconds before their
+reported expiry; a backend restart clears the cache.
 
 The culture-preservation callback uses the path in `MPESA_CALLBACK_URL`. Ticket
 checkout overrides that path with `/api/v1/tickets/webhook/mpesa`. Both routes
