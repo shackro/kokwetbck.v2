@@ -393,6 +393,7 @@ def main() -> None:
             checkout_id: str,
             amount: int,
             result_code: int = 0,
+            result_description: str = "The service request is processed successfully.",
             *,
             receipt_number: str | None = None,
             phone_number: int | None = None,
@@ -410,6 +411,7 @@ def main() -> None:
                     "stkCallback": {
                         "CheckoutRequestID": checkout_id,
                         "ResultCode": result_code,
+                        "ResultDesc": result_description,
                         "CallbackMetadata": {
                             "Item": items
                         },
@@ -675,7 +677,12 @@ def main() -> None:
             cancel_callback_status, cancel_callback = call(
                 "POST",
                 callback_url,
-                mpesa_callback(cancelled_checkout_id, 0, result_code=1032),
+                mpesa_callback(
+                    cancelled_checkout_id,
+                    0,
+                    result_code=1032,
+                    result_description=" The user cancelled the request. ",
+                ),
             )
             assert cancel_callback_status == 200
             assert cancel_callback == {"ResultCode": 0, "ResultDesc": "Success"}
@@ -683,6 +690,8 @@ def main() -> None:
                 "GET", f"/api/v1/tickets/orders/{cancelled_order['order_id']}"
             )
             assert cancelled_order_status["status"] == "Payment cancelled"
+            assert cancelled_order_status["payment_result_code"] == "1032"
+            assert cancelled_order_status["payment_failure_reason"] == "The user cancelled the request."
             print("PASS Daraja cancellation callback acknowledges and releases the ticket reservation")
 
             expiry_status, expiring_order = call(

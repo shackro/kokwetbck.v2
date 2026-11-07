@@ -130,6 +130,20 @@ class TicketScanRequest(BaseModel):
         return normalized
 
 
+def _safe_mpesa_description(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    description = " ".join(value.split())[:240]
+    return description or None
+
+
+def _safe_mpesa_result_code(value: Any) -> str | None:
+    if isinstance(value, (str, int)) and not isinstance(value, bool):
+        result_code = str(value).strip()[:40]
+        return result_code or None
+    return None
+
+
 def _ticket_encryption_key() -> bytes:
     configured_key = os.getenv("TICKET_ENCRYPTION_KEY")
     key_env_name = "TICKET_ENCRYPTION_KEY"
@@ -366,7 +380,9 @@ def initialize_catalog_store(*, seed_data: bool = True) -> None:
                 inventory_released INTEGER NOT NULL DEFAULT 0,
                 mpesa_receipt_number TEXT,
                 mpesa_transaction_date TEXT,
-                mpesa_phone TEXT
+                mpesa_phone TEXT,
+                mpesa_result_code TEXT,
+                mpesa_result_description TEXT
             );
             CREATE TABLE IF NOT EXISTS festival_tickets (
                 ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -398,6 +414,8 @@ def initialize_catalog_store(*, seed_data: bool = True) -> None:
             ("mpesa_receipt_number", "TEXT"),
             ("mpesa_transaction_date", "TEXT"),
             ("mpesa_phone", "TEXT"),
+            ("mpesa_result_code", "TEXT"),
+            ("mpesa_result_description", "TEXT"),
         ):
             if column not in order_columns:
                 connection.execute(f"ALTER TABLE festival_orders ADD COLUMN {column} {definition}")
@@ -862,10 +880,11 @@ def checkout_cart(payload: CheckoutRequest) -> dict[str, Any]:
             if error.payment_may_have_started:
                 connection.execute(
                     """
-                    UPDATE festival_orders SET status = 'Payment review'
+                    UPDATE festival_orders
+                    SET status = 'Payment review', mpesa_result_description = ?
                     WHERE order_id = ? AND status = 'Payment pending'
                     """,
-                    (order_id,),
+                    (_safe_mpesa_description(error.detail), order_id),
                 )
                 connection.execute(
                     "UPDATE festival_tickets SET status = 'Payment review' WHERE order_id = ?",
@@ -880,10 +899,11 @@ def checkout_cart(payload: CheckoutRequest) -> dict[str, Any]:
                 connection.execute(
                     """
                     UPDATE festival_orders
-                    SET status = 'Payment failed', inventory_released = 1
+                    SET status = 'Payment failed', inventory_released = 1,
+                        mpesa_result_description = ?
                     WHERE order_id = ? AND status = 'Payment pending'
                     """,
-                    (order_id,),
+                    (_safe_mpesa_description(error.detail), order_id),
                 )
                 connection.execute(
                     "UPDATE festival_tickets SET status = 'Payment failed' WHERE order_id = ?",
@@ -908,7 +928,25 @@ def checkout_cart(payload: CheckoutRequest) -> dict[str, Any]:
                 "UPDATE festival_tickets SET status = 'Payment failed' WHERE order_id = ?",
                 (order_id,),
             )
-        raise HTTPException(status_code=502, detail="M-Pesa could not start the ticket payment")
+        response_code = _safe_mpesa_result_code(response.get("ResponseCode"))
+        response_description = _safe_mpesa_description(
+            response.get("ResponseDescription")
+        )
+        failure_reason = response_description or "M-Pesa did not accept the request."
+        with _connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE festival_orders
+                SET mpesa_result_code = ?, mpesa_result_description = ?
+                WHERE order_id = ?
+                """,
+                (response_code, failure_reason, order_id),
+            )
+        detail = "M-Pesa could not start the ticket payment"
+        if response_code:
+            detail += f" (code {response_code})"
+        raise HTTPException(status_code=502, detail=f"{detail}: {failure_reason}")
 
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -934,7 +972,8 @@ def checkout_cart(payload: CheckoutRequest) -> dict[str, Any]:
 def _ticket_order_payload(connection: sqlite3.Connection, order_id: str) -> dict[str, Any]:
     order = connection.execute(
         """
-        SELECT order_id, total, status, reservation_expires_at, receipt_email_sent_at
+        SELECT order_id, total, status, reservation_expires_at, receipt_email_sent_at,
+               mpesa_result_code, mpesa_result_description
         FROM festival_orders WHERE order_id = ?
         """,
         (order_id,),
@@ -974,7 +1013,7 @@ def _ticket_order_payload(connection: sqlite3.Connection, order_id: str) -> dict
                     "status": row["status"],
                 }
             )
-    return {
+    payload: dict[str, Any] = {
         "order_id": order["order_id"],
         "total": order["total"],
         "status": order["status"],
@@ -982,6 +1021,10 @@ def _ticket_order_payload(connection: sqlite3.Connection, order_id: str) -> dict
         "email_sent": bool(order["receipt_email_sent_at"]),
         "tickets": ticket_payloads,
     }
+    if order["status"] in {"Payment failed", "Payment cancelled"}:
+        payload["payment_result_code"] = order["mpesa_result_code"]
+        payload["payment_failure_reason"] = order["mpesa_result_description"]
+    return payload
 
 
 def _ticket_access_url(order_id: str) -> str:
@@ -1125,11 +1168,22 @@ def ticket_payment_webhook(
             payment_status = (
                 "Payment cancelled" if result_code == 1032 else "Payment failed"
             )
+            result_description = _safe_mpesa_description(callback.get("ResultDesc"))
             if not order["inventory_released"]:
                 _release_reserved_inventory(connection, order["order_id"])
             connection.execute(
-                "UPDATE festival_orders SET status = ?, inventory_released = 1 WHERE order_id = ?",
-                (payment_status, order["order_id"]),
+                """
+                UPDATE festival_orders
+                SET status = ?, inventory_released = 1,
+                    mpesa_result_code = ?, mpesa_result_description = ?
+                WHERE order_id = ?
+                """,
+                (
+                    payment_status,
+                    str(result_code),
+                    result_description,
+                    order["order_id"],
+                ),
             )
             connection.execute(
                 "UPDATE festival_tickets SET status = ? WHERE order_id = ?",

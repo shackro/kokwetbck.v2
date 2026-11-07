@@ -71,6 +71,32 @@ class MpesaCheckoutErrorTests(unittest.TestCase):
             phone="0703412694",
         )
 
+    def test_existing_order_schema_migrates_provider_failure_fields(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE festival_orders (
+                    order_id TEXT PRIMARY KEY,
+                    phone TEXT NOT NULL,
+                    total INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    simulated INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+
+        with patch.dict(os.environ, {"KOKWET_DB_PATH": str(legacy_path)}):
+            initialize_catalog_store(seed_data=False)
+
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(festival_orders)")
+            }
+        self.assertIn("mpesa_result_code", columns)
+        self.assertIn("mpesa_result_description", columns)
+
     def test_definite_rejection_reports_reason_and_releases_inventory(self):
         with patch(
             "app.catalog._initiate_stk_push",
