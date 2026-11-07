@@ -130,6 +130,7 @@ async def audit_super_admin_mutations(request: Request, call_next):
 
 configured_origins = os.getenv("KOKWET_CORS_ORIGINS")
 production_origins = [
+    "https://kokwet2.vercel.app",
     "https://kokwet-lyart.vercel.app",
     "https://kokwet-n1dp1914w-shackros-projects.vercel.app",
 ]

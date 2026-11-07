@@ -4,6 +4,12 @@ from main import _cors_settings
 
 
 class LocalCorsSettingsTests(unittest.TestCase):
+    def test_production_vercel_site_is_allowed(self) -> None:
+        origins, origin_regex = _cors_settings(None, "production")
+
+        self.assertIn("https://kokwet2.vercel.app", origins)
+        self.assertNotRegex("https://kokwet2.vercel.app.evil.test", origin_regex)
+
     def test_local_origins_remain_allowed_with_custom_origins(self) -> None:
         origins, origin_regex = _cors_settings(
             "https://admin.example.test/", "development"
